@@ -1,30 +1,65 @@
-import aiohttp
+import requests
+from abc import ABC, abstractmethod
+from datetime import datetime
 
-class Tiingo:
+class QuantfolioWebInterface(ABC):
+    @abstractmethod
+    def get_historical_close(self, ticker, start_time, end_time):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_historical_close_async(self, ticker, session, start_time, end_time):
+        raise NotImplementedError
+
+class TiingoWebReader(QuantfolioWebInterface):
     def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = "https://api.tiingo.com/"
+        if not self.valid_key:
+            raise ValueError("Invalid key provided")
     
-    async def close_history_async(self, ticker, session=None):
-        url = self.base_url + f"/tiingo/daily/{ticker}/prices?start_date=1970-01-01"
+    @property
+    def valid_key(self):
+        url = self.base_url + "api/test"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Token {self.api_key}"
+        }
+        with requests.get(url, headers=headers) as response:
+            return response.json().get("message") == "You successfully sent a request"
+    
+    async def get_historical_close_async(self, ticker, session, start_date='1970-01-01', end_date=datetime.now().strftime('%Y-%m-%d')):
+        url = self.base_url + f"tiingo/daily/{ticker}/prices?start_date=1970-01-01"
         daily_close = {}
-
-        need_close_session = False
-        if not session:
-            session = aiohttp.ClientSession()
-            need_close_session = True
         
         parameters = {
-            "token": self.api_key
+            "token": self.api_key,
+            "start_date": start_date,
+            "end_date": end_date
         }
-        async with session.get(url, params=parameters) as response:
-            if response.status != 200:
-                raise ValueError(f"Unable to recieve a valid response for ticker {ticker}")
+
+        async with session.get(url, params=parameters, raise_for_status=True) as response:
             daily_prices = await response.json()
             for day in daily_prices:
                 daily_close[day['date']] = day['adjClose']
         
-        if need_close_session:
-            await session.close()
+        return daily_close
+    
+    def get_historical_close(self, ticker, start_date='1970-01-01', end_date=datetime.now().strftime('%Y-%m-%d')):
+        session = requests.Session()
+        url = self.base_url + f"tiingo/daily/{ticker}/prices"
+        daily_close = {}
+
+        parameters = {
+            "token": self.api_key,
+            "start_date": start_date,
+            "end_date": end_date
+        }
+
+        with session.get(url, params=parameters) as response:
+            response.raise_for_status()
+            daily_prices = response.json()
+            for day in daily_prices:
+                daily_close[day['date']] = day['adjClose']
         
         return daily_close
