@@ -1,6 +1,7 @@
 import requests
 from abc import ABC, abstractmethod
 from datetime import datetime
+import aiohttp
 
 class QuantfolioWebInterface(ABC):
     @abstractmethod
@@ -10,6 +11,10 @@ class QuantfolioWebInterface(ABC):
     @abstractmethod
     def get_historical_close_async(self, ticker, session, start_time, end_time):
         raise NotImplementedError
+
+    @staticmethod
+    def generate_async_session():
+        return aiohttp.ClientSession()
 
 class TiingoWebReader(QuantfolioWebInterface):
     def __init__(self, api_key):
@@ -29,19 +34,21 @@ class TiingoWebReader(QuantfolioWebInterface):
             return response.json().get("message") == "You successfully sent a request"
     
     async def get_historical_close_async(self, ticker, session, start_date='1970-01-01', end_date=datetime.now().strftime('%Y-%m-%d')):
-        url = self.base_url + f"tiingo/daily/{ticker}/prices?start_date=1970-01-01"
+        url = self.base_url + f"tiingo/daily/{ticker}/prices"
         daily_close = {}
         
         parameters = {
             "token": self.api_key,
-            "start_date": start_date,
-            "end_date": end_date
+            "startDate": start_date,
+            "endDate": end_date
         }
 
         async with session.get(url, params=parameters, raise_for_status=True) as response:
             daily_prices = await response.json()
             for day in daily_prices:
-                daily_close[day['date']] = day['adjClose']
+                daily_close[day['date']] = {'high': day['adjHigh'], 'low': day['adjLow'], 
+                                            'open': day['adjOpen'], 'close': day['adjClose'],
+                                            'volume': day['adjVolume'], 'dividend': day['divCash']}
         
         return daily_close
     
@@ -52,14 +59,16 @@ class TiingoWebReader(QuantfolioWebInterface):
 
         parameters = {
             "token": self.api_key,
-            "start_date": start_date,
-            "end_date": end_date
+            "startDate": start_date,
+            "endDate": end_date
         }
 
         with session.get(url, params=parameters) as response:
             response.raise_for_status()
             daily_prices = response.json()
             for day in daily_prices:
-                daily_close[day['date']] = day['adjClose']
+                daily_close[day['date']] = {'high': day['adjHigh'], 'low': day['adjLow'], 
+                                            'open': day['adjOpen'], 'close': day['adjClose'],
+                                            'volume': day['adjVolume'], 'dividend': day['divCash']}
         
         return daily_close
