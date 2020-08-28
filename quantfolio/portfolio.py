@@ -1,6 +1,12 @@
 from __future__ import annotations
+from .web import QuantfolioWebInterface
 import asyncio
+import aiohttp
+from datetime import datetime
 from .asset import Asset, AssetList
+import pandas as pd
+import numpy as np
+from math import sqrt
 from typing import Dict, Union, List, Optional
 
 
@@ -9,7 +15,8 @@ class Portfolio:
         self._asset_weights: Dict[str, float] = self.validate_assets(assets)
         self._assets = AssetList(self._asset_weights)
         self._tickers: List[str] = self._assets.tickers
-        self._benchmark = None
+        self._historical = pd.DataFrame()
+        self._correlation = pd.DataFrame()
     
     def validate_assets(self, incoming_assets):
         """
@@ -44,8 +51,6 @@ class Portfolio:
         if not isinstance(weights, dict) or not all(isinstance(tkr, str) & isinstance(val, float) for tkr, val in weights.items()):
             raise ValueError("Weights values must be a {ticker: weight} dict of type with string type keys and float type values")
         for ticker, weight in weights.items():
-            if ticker not in self._tickers:
-                raise ValueError(f"Unassigned ticker {ticker} provided in weights. Portfolio tickers: {self.tickers}")
             if weight > 1:
                 weights[ticker] = weight / 100
         if not sum(weights.values()) == 1:
@@ -60,23 +65,6 @@ class Portfolio:
     def tickers(self):
         return list(self._tickers)
     
-    @property
-    def benchmark(self):
-        if not self._benchmark:
-            self._benchmark = Portfolio('spy')
-        return self._benchmark
-
-    @benchmark.setter
-    def benchmark(self, new_benchmark: Portfolio):
-        """
-        Set the benchmark portfolio for evaluation of relative success
-        :param benchmark: new portfolio to use as a benchmark when evaluating current portfolio
-        :return: Portfolio with equal weightings of benchmark tickers
-        """
-        if new_benchmark != self.benchmark:
-            self._benchmark = new_benchmark
-
-    
     def equal_weights(self, assets) -> Dict[str, float]:
         """
         Function to equally weigh securities in the portfolio. Used as default weight scheme
@@ -90,6 +78,58 @@ class Portfolio:
         :param weights: dictionary with key-value pairs of 
         """
         return Portfolio(weights)
+    
+    def get_historical_data(self, reader: QuantfolioWebInterface):
+        for asset in self.assets:
+            asset.get_historical_data(reader)
+        return
+    
+    async def get_historical_data_async(self, reader: QuantfolioWebInterface, start_date: str = '1970-01-01', end_date: str = datetime.now().strftime('%Y-%m-%d'), progress_bar=False):
+        async with aiohttp.ClientSession() as session:
+            asset_iterator = asyncio.as_completed([asset.get_historical_data_async(reader, session, start_date, end_date) for asset in self.assets])
+            if progress_bar:
+                import tqdm
+                asset_iterator = tqdm.tqdm(asset_iterator, total=len(self.assets))
+            for ret in asset_iterator:
+                await ret
+    
+    @property
+    def historical(self):
+        if self._historical.empty:
+            self._historical = pd.concat({asset.ticker: asset.historical for asset in self.assets})
+        return self._historical
+    
+    @property
+    def historical_returns(self):
+        historical_close = self.historical.close.unstack(level=0).dropna()
+        return np.log(historical_close).diff()
+    
+    @property
+    def arithmetic_historical_returns(self):
+        historical_close = self.historical.close.unstack(level=0).dropna()
+        return historical_close.pct_change()
+    
+    @property
+    def covariance(self):
+        return self.historical_returns.cov()
+    
+    @property
+    def arithmetic_covariance(self):
+        return self.arithmetic_historical_returns.cov()
+    
+    @property
+    def weights(self):
+        return np.array([asset.weight for asset in self.assets])
+    
+    @property
+    def correlation(self):
+        return self.historical_returns.corr()
+
+    def sharpe_ratio(self, risk_free_rate=0.02, trading_days_per_year=252):
+        avg_daily_returns = self.historical_returns.mean()
+        portfolio_annualized_return = np.sum(avg_daily_returns * self.weights) * trading_days_per_year
+        portfolio_standard_deviation = sqrt(np.dot(self.weights.T, np.dot(self.covariance, self.weights))) * sqrt(trading_days_per_year)
+        return (portfolio_annualized_return - risk_free_rate) / portfolio_standard_deviation
     
     def __repr__(self):
         return str(self._assets)
