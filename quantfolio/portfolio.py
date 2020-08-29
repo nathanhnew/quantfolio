@@ -11,9 +11,10 @@ from typing import Dict, Union, List, Optional
 
 
 class Portfolio:   
-    def __init__(self, assets: Union[str, List[str], Dict[str, float]]):
+    def __init__(self, assets: Union[str, List[str], Dict[str, float]], initial_value=10000):
         self._asset_weights: Dict[str, float] = self.validate_assets(assets)
         self._assets = AssetList(self._asset_weights)
+        self.initial_value = initial_value
         self._tickers: List[str] = self._assets.tickers
         self._historical = pd.DataFrame()
         self._correlation = pd.DataFrame()
@@ -100,14 +101,62 @@ class Portfolio:
         return self._historical
     
     @property
-    def historical_returns(self):
-        historical_close = self.historical.close.unstack(level=0).dropna()
+    def min_date(self):
+        return self.historical.close.dropna().index.min()
+    
+    @property
+    def max_date(self):
+        return self.historical.close.dropna().index.max()
+    
+    @property
+    def historical_asset_returns(self):
+        historical_close = self.historical.close.unstack(level=0).dropna().asfreq('B')
         return np.log(historical_close).diff()
     
     @property
-    def arithmetic_historical_returns(self):
-        historical_close = self.historical.close.unstack(level=0).dropna()
+    def arithmetic_historical_asset_returns(self):
+        historical_close = self.historical.close.unstack(level=0).dropna().asfreq('B')
         return historical_close.pct_change()
+    
+    @property
+    def historical_returns(self):
+        portfolio_close = self.historical_asset_returns * self.weights
+        return portfolio_close.sum(axis=1)
+    
+    @property
+    def arithmetic_historical_returns(self):
+        portfolio_close = self.arithmetic_historical_asset_returns * self.weights
+        return portfolio_close.sum(axis=1)
+    
+    @property
+    def historical_value(self):
+        historical_returns = self.historical_returns
+        historical_value = historical_returns.to_frame(name='daily_return').reset_index()
+        for ind, row in historical_value.iterrows():
+            if ind == 0:
+                dollar_value = self.initial_value
+            else:
+                dollar_value = historical_value.loc[ind - 1, 'daily_value'] * (1 + row['daily_return'])
+            historical_value.loc[ind, 'daily_value'] = round(dollar_value, 2)
+        return historical_value.set_index('index').rename_axis(index=None).asfreq('B').daily_value
+    
+    def historical_value_with_contributions(self, contribution_amount: float, contribution_frequency: str):
+        if contribution_frequency not in ['d', 'w', 'm', 'q', 'y']:
+            raise ValueError(f'Contribution frequency must be in one of the following [d, w, m, q, y]. Value: {contribution_frequency}')
+        historical_returns = self.historical_returns
+        historical_value = historical_returns.to_frame(name='daily_return').reset_index()
+        for ind, row in historical_value.iterrows():
+            if ind == 0:
+                dollar_value = self.initial_value
+            else:
+                dollar_value = historical_value.loc[ind - 1, 'daily_value'] * (1 + row['daily_return'])
+                if contribution_frequency == 'd' or (contribution_frequency == 'w' and row['index'].dayofweek == 0) or \
+                    (contribution_frequency == 'm' and row['index'].is_month_start) or (contribution_frequency == 'q' and row['index'].is_quarter_start) or \
+                    (contribution_frequency == 'y' and row['index'].is_year_start):
+                    dollar_value += contribution_amount
+            historical_value.loc[ind, 'daily_value'] = round(dollar_value, 2)
+        return historical_value.set_index('index').rename_axis(index=None).asfreq('B').daily_value
+
     
     @property
     def covariance(self):
@@ -122,8 +171,12 @@ class Portfolio:
         return np.array([asset.weight for asset in self.assets])
     
     @property
-    def correlation(self):
-        return self.historical_returns.corr()
+    def autocorrelation_matrix(self):
+        return self.historical_asset_returns.corr()
+    
+    @property
+    def autocorrelation(self):
+        return self.autocorrelation_matrix.values[np.triu_indices_from(self.autocorrelation_matrix.values, 1)].mean()
 
     def sharpe_ratio(self, risk_free_rate=0.02, trading_days_per_year=252):
         avg_daily_returns = self.historical_returns.mean()
