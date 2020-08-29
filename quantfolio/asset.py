@@ -11,7 +11,7 @@ from pytz import UTC
 class Asset:
     def __init__(self, ticker: str, weight: float = 1):
         self.ticker = ticker.upper()
-        self.weight = weight if weight =< 1 else weight / 100
+        self.weight = weight if weight <= 1 else weight / 100
         self.historical = None
         self._pct_change = None
         self._pct_change_raw = None
