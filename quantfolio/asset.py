@@ -29,14 +29,14 @@ class Asset:
         closing_prices = web_reader.get_historical_close(self.ticker, start_date, end_date)
         df = pd.DataFrame.from_dict(closing_prices, orient='index')
         df.index = pd.to_datetime(df.index)
-        self.historical = df
+        self.historical = df.asfreq('B').tz_convert(None)
         return
     
     async def get_historical_data_async(self, web_reader: QuantfolioWebInterface, session: aiohttp.ClientSession, start_date: str = '1970-01-01', end_date: str = datetime.now().strftime('%Y-%m-%d')) -> None:
         closing_prices = await web_reader.get_historical_close_async(self.ticker, session, start_date, end_date)
         df = pd.DataFrame.from_dict(closing_prices, orient='index')
         df.index = pd.to_datetime(df.index)
-        self.historical = df
+        self.historical = df.asfreq('B').tz_convert(None)
         return
     
     def assert_historical(func):
