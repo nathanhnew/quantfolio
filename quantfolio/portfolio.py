@@ -164,7 +164,7 @@ class Portfolio:
     
     @property
     def arithmetic_covariance(self):
-        return self.arithmetic_historical_returns.cov()
+        return self.arithmetic_historical_returns.close.cov()
     
     @property
     def weights(self):
@@ -178,11 +178,11 @@ class Portfolio:
     def autocorrelation(self):
         return self.autocorrelation_matrix.values[np.triu_indices_from(self.autocorrelation_matrix.values, 1)].mean()
 
-    def sharpe_ratio(self, risk_free_rate=0.02, trading_days_per_year=252):
+    def sharpe_ratio(self, risk_free_rate=0.0245, trading_days_per_year=252):
         avg_daily_returns = self.historical_returns.mean()
-        portfolio_annualized_return = np.sum(avg_daily_returns * self.weights) * trading_days_per_year
-        portfolio_standard_deviation = sqrt(np.dot(self.weights.T, np.dot(self.covariance, self.weights))) * sqrt(trading_days_per_year)
-        return (portfolio_annualized_return - risk_free_rate) / portfolio_standard_deviation
+        daily_rfr = (1 + risk_free_rate) ** (1 / trading_days_per_year) - 1
+        portfolio_standard_deviation = self.historical_returns.std()
+        return (avg_daily_returns - daily_rfr) / portfolio_standard_deviation * sqrt(trading_days_per_year)
     
     def __repr__(self):
         return str(self._assets)
