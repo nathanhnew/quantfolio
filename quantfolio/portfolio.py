@@ -7,6 +7,7 @@ from .asset import Asset, AssetList
 import pandas as pd
 import numpy as np
 from math import sqrt
+from functools import wraps
 from typing import Dict, Union, List, Optional
 
 
@@ -18,6 +19,8 @@ class Portfolio:
         self._tickers: List[str] = self._assets.tickers
         self._historical = pd.DataFrame()
         self._correlation = pd.DataFrame()
+        self._historical_return = pd.Series()
+        self._arithmetic_historical_return = pd.Series()
     
     def validate_assets(self, incoming_assets):
         """
@@ -94,6 +97,15 @@ class Portfolio:
             for ret in asset_iterator:
                 await ret
     
+    def assert_historical(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if args[0].historical is None or args[0].historical.empty:
+                raise ValueError("Historical data must be defined for portfolio before calling this function. Please call .get_historical_data() or .get_historical_data_async() first")
+            value = func(*args, **kwargs)
+            return value
+        return wrapper
+    
     @property
     def historical(self):
         if self._historical.empty:
@@ -101,42 +113,62 @@ class Portfolio:
         return self._historical
     
     @property
+    @assert_historical
     def min_date(self):
-        return self.historical.close.dropna().index.min()
+        return self.historical.close.unstack(level=0).dropna().index.min()
     
     @property
+    @assert_historical
     def max_date(self):
-        return self.historical.close.dropna().index.max()
+        return self.historical.close.unstack(level=0).dropna().index.max()
     
     @property
+    @assert_historical
     def historical_asset_returns(self):
-        historical_close = self.historical.close.unstack(level=0).dropna().asfreq('B')
-        return np.log(historical_close).diff()
+        historical_close = self.historical.close.unstack(level=0).dropna()
+        historical_close = np.log(historical_close).diff()
+        return historical_close
     
     @property
+    @assert_historical
     def arithmetic_historical_asset_returns(self):
-        historical_close = self.historical.close.unstack(level=0).dropna().asfreq('B')
+        historical_close = self.historical.close.unstack(level=0).dropna()
         return historical_close.pct_change()
     
     @property
-    def historical_returns(self):
-        portfolio_close = self.historical_asset_returns * self.weights
-        return portfolio_close.sum(axis=1)
+    @assert_historical
+    def geometric_historical_return(self):
+        if self._historical_return.empty:
+            portfolio_close = self.historical_asset_returns * self.weights
+            self._historical_return = portfolio_close.sum(axis=1)
+            self._historical_return.iat[0] = 0
+        return self._historical_return
     
     @property
-    def arithmetic_historical_returns(self):
-        portfolio_close = self.arithmetic_historical_asset_returns * self.weights
-        return portfolio_close.sum(axis=1)
+    @assert_historical
+    def arithmetic_historical_return(self):
+        if self._arithmetic_historical_return.empty:
+            portfolio_close = self.arithmetic_historical_asset_returns * self.weights
+            self._arithmetic_historical_return = portfolio_close.sum(axis=1)
+            self._arithmetic_historical_return.iat[0] = 0
+        return self._arithmetic_historical_return
     
     @property
+    @assert_historical
     def historical_value(self):
-        return (((self.historical_returns + 1).cumprod()) * self.initial_value).round(2)
+        return (((self.arithmetic_historical_return + 1).cumprod()) * self.initial_value).round(2)
     
+    @property
+    @assert_historical
+    def total_return(self):
+        return (self.arithmetic_historical_return + 1).cumprod()[-1]
+    
+    @assert_historical
     def historical_value_with_contributions(self, contribution_amount: float, contribution_frequency: str):
         if contribution_frequency not in ['d', 'w', 'm', 'q', 'y']:
             raise ValueError(f'Contribution frequency must be in one of the following [d, w, m, q, y]. Value: {contribution_frequency}')
-        historical_returns = self.historical_returns
-        historical_value = historical_returns.to_frame(name='daily_return').reset_index()
+        historical_return = self.geometric_historical_return
+        historical_value = historical_return.to_frame(name='daily_return').reset_index()
         for ind, row in historical_value.iterrows():
             if ind == 0:
                 dollar_value = self.initial_value
@@ -147,39 +179,92 @@ class Portfolio:
                     (contribution_frequency == 'y' and row['index'].is_year_start):
                     dollar_value += contribution_amount
             historical_value.loc[ind, 'daily_value'] = dollar_value
-        return historical_value.set_index('index').rename_axis(index=None).asfreq('B').daily_value.round(2)
-
+        return historical_value.set_index('index').rename_axis(index=None).daily_value.round(2)
     
     @property
-    def covariance(self):
-        return self.historical_returns.cov()
-    
-    @property
-    def arithmetic_covariance(self):
-        return self.arithmetic_historical_returns.close.cov()
-    
-    @property
+    @assert_historical
     def weights(self):
         return np.array([asset.weight for asset in self.assets])
     
     @property
+    @assert_historical
     def autocorrelation_matrix(self):
         return self.historical_asset_returns.corr()
     
     @property
+    @assert_historical
     def autocorrelation(self):
         return self.autocorrelation_matrix.values[np.triu_indices_from(self.autocorrelation_matrix.values, 1)].mean()
+    
+    @assert_historical
+    def return_over_period(self, start: Union[datetime, str], end: Union[datetime, str]):
+        start, end = self._date_string_to_datetime(start, end)
+        if end < start:
+            raise ValueError(f"Period end must be after period beginning")
+        if start < self.min_date or start > self.max_date:
+            raise ValueError(f"Starting point out of range\n{start} must be between {self.min_date} and {self.max_date}")
+        if end < self.min_date or end > self.max_date:
+            raise ValueError(f"Ending point out of range\n{end} must be between {self.min_date} and {self.max_date}")
+        period_return = self.arithmetic_historical_return[start: end].copy()
+        period_return.iat[0] = 0
+        return (period_return + 1).cumprod()[-1]
+    
+    @assert_historical
+    def correlation(self, other: Portfolio, range_start: datetime = None, range_end: datetime = None) -> float:
+        range_start, range_end = self._time_overlap(other, range_start, range_end)
+        left = self.geometric_historical_return[range_start: range_end]
+        right = other.geometric_historical_return[range_start: range_end]
+        return left.corr(right)
+    
+    @assert_historical
+    def portfolio_time_overlap(self, other: Portfolio):
+        return [max(self.min_date, other.min_date), min(self.max_date, other.max_date)]
+    
+    def _date_string_to_datetime(self, range_start: Union[datetime, str] = None, range_end: Union[datetime, str] = None):
+        if range_start and isinstance(range_start, str):
+            range_start = datetime.strptime(range_start, "%Y-%m-%d")
+        if range_end and isinstance(range_end, str):
+            range_end = datetime.strptime(range_end, "%Y-%m-%d")        
+        return range_start, range_end
+    
+    def _time_overlap(self, other, period_start: Union[datetime, str] = None, period_end: Union[datetime, str] = None) -> [datetime, datetime]:
+        period_start, period_end = self._date_string_to_datetime(period_start, period_end)
+        period_start = period_start or self.portfolio_time_overlap(other)[0]
+        period_end = period_end or self.portfolio_time_overlap(other)[1]
+        if period_start < self.min_date or period_start < other.min_date:
+            raise ValueError(f"Starting period out of range\n{period_start} provided must be greater than {self.min_date} and {other.min_date}")
+        if period_end > self.max_date or period_start > other.max_date:
+            raise ValueError(f"Ending period out of range\n{period_end} provided must be less than {self.max_date} and {other.max_date}")
+        return period_start, period_end
 
+    @assert_historical
+    def alpha(self, benchmark: Portfolio, risk_free_rate=0.0245, period_start: Union[datetime, str] = None, period_end: Union[datetime, str] = None):
+        period_start, period_end = self._time_overlap(benchmark, period_start, period_end)
+        portfolio_time_slice = self.geometric_historical_return[period_start: period_end].copy()
+        benchmark_time_slice = benchmark.geometric_historical_return[period_start:period_end].copy()
+        portfolio_time_slice.iat[0] = 0
+        benchmark_time_slice.iat[0] = 0
+        portfolio_return = (portfolio_time_slice + 1).cumprod()[-1]
+        benchmark_return = (benchmark_time_slice + 1).cumprod()[-1]
+        return portfolio_return - risk_free_rate - self.beta(benchmark, period_start, period_end) * (benchmark_return - risk_free_rate)
+    
+    @assert_historical
+    def beta(self, benchmark: Portfolio, period_start: Union[datetime, str] = None, period_end: Union[datetime, str] = None):
+        period_start, period_end = self._time_overlap(benchmark, period_start, period_end)
+        return self.geometric_historical_return[period_start:period_end].std() / benchmark.geometric_historical_return[period_start: period_end].std() * self.correlation(benchmark, period_start, period_end)
+        
+    @assert_historical
     def sharpe_ratio(self, risk_free_rate=0.0245, trading_days_per_year=252):
-        avg_daily_returns = self.historical_returns.mean()
+        avg_daily_returns = self.geometric_historical_return.mean()
         daily_rfr = (1 + risk_free_rate) ** (1 / trading_days_per_year) - 1
-        portfolio_standard_deviation = self.historical_returns.std()
+        portfolio_standard_deviation = self.geometric_historical_return.std()
         return (avg_daily_returns - daily_rfr) / portfolio_standard_deviation * sqrt(trading_days_per_year)
     
+    @assert_historical
     def sortino_ratio(self, risk_free_rate=0.0245, trading_days_per_year=252):
-        avg_daily_returns = self.historical_returns.mean()
+        avg_daily_returns = self.geometric_historical_return.mean()
         daily_rfr = (1 + risk_free_rate) ** (1 / trading_days_per_year) - 1
-        downside_deviation = self.historical_returns.add(risk_free_rate * -1).where(lambda ret: ret < 0).dropna().std()
+        downside_deviation = self.geometric_historical_return.add(risk_free_rate * -1).where(lambda ret: ret < 0).dropna().std()
         return (avg_daily_returns - daily_rfr) / downside_deviation * sqrt(trading_days_per_year)
     
     def __repr__(self):
