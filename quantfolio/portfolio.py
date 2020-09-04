@@ -97,7 +97,7 @@ class Portfolio:
     @property
     def historical(self):
         if self._historical.empty:
-            self._historical = pd.concat({asset.ticker: asset.historical for asset in self.assets})
+            self._historical = pd.concat({asset.ticker: asset.historical for asset in self.assets}).dropna()
         return self._historical
     
     @property
@@ -130,15 +130,7 @@ class Portfolio:
     
     @property
     def historical_value(self):
-        historical_returns = self.historical_returns
-        historical_value = historical_returns.to_frame(name='daily_return').reset_index()
-        for ind, row in historical_value.iterrows():
-            if ind == 0:
-                dollar_value = self.initial_value
-            else:
-                dollar_value = historical_value.loc[ind - 1, 'daily_value'] * (1 + row['daily_return'])
-            historical_value.loc[ind, 'daily_value'] = round(dollar_value, 2)
-        return historical_value.set_index('index').rename_axis(index=None).asfreq('B').daily_value
+        return (((self.historical_returns + 1).cumprod()) * self.initial_value).round(2)
     
     def historical_value_with_contributions(self, contribution_amount: float, contribution_frequency: str):
         if contribution_frequency not in ['d', 'w', 'm', 'q', 'y']:
@@ -154,8 +146,8 @@ class Portfolio:
                     (contribution_frequency == 'm' and row['index'].is_month_start) or (contribution_frequency == 'q' and row['index'].is_quarter_start) or \
                     (contribution_frequency == 'y' and row['index'].is_year_start):
                     dollar_value += contribution_amount
-            historical_value.loc[ind, 'daily_value'] = round(dollar_value, 2)
-        return historical_value.set_index('index').rename_axis(index=None).asfreq('B').daily_value
+            historical_value.loc[ind, 'daily_value'] = dollar_value
+        return historical_value.set_index('index').rename_axis(index=None).asfreq('B').daily_value.round(2)
 
     
     @property
@@ -183,6 +175,12 @@ class Portfolio:
         daily_rfr = (1 + risk_free_rate) ** (1 / trading_days_per_year) - 1
         portfolio_standard_deviation = self.historical_returns.std()
         return (avg_daily_returns - daily_rfr) / portfolio_standard_deviation * sqrt(trading_days_per_year)
+    
+    def sortino_ratio(self, risk_free_rate=0.0245, trading_days_per_year=252):
+        avg_daily_returns = self.historical_returns.mean()
+        daily_rfr = (1 + risk_free_rate) ** (1 / trading_days_per_year) - 1
+        downside_deviation = self.historical_returns.add(risk_free_rate * -1).where(lambda ret: ret < 0).dropna().std()
+        return (avg_daily_returns - daily_rfr) / downside_deviation * sqrt(trading_days_per_year)
     
     def __repr__(self):
         return str(self._assets)
