@@ -17,6 +17,7 @@ black = "^24.10.0"
 isort = "^6.0.0"
 pre-commit = "^4.1.0"
 autopep8 = "^2.3.2"
+pandas-stubs = "^2.2.3.241126"
 
 
 [tool.poetry.group.test.dependencies]
